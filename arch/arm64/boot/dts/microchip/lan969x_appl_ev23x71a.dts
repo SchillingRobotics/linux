@@ -42,6 +42,29 @@
 		status = "okay";
 	};
 */
+
+	/* 24V port power control via two daisy-chained 74HC595 shift registers */
+	spi_port_power: spi-gpio-power {
+		compatible = "spi-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		sck-gpios = <&gpio 32 GPIO_ACTIVE_HIGH>;   /* SHIFT_CLK (SH_CP) */
+		mosi-gpios = <&gpio 31 GPIO_ACTIVE_HIGH>;  /* SER_DATA_IN (DS) */
+		cs-gpios = <&gpio 34 GPIO_ACTIVE_HIGH>;    /* LATCH_CLK (ST_CP) */
+		num-chipselects = <1>;
+
+		port_power: gpio-expander@0 {
+			compatible = "fairchild,74hc595";
+			reg = <0>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			registers-number = <2>;  /* Two 595s daisy-chained */
+			enable-gpios = <&gpio 35 GPIO_ACTIVE_LOW>;  /* nOUTPUT_EN (OE) */
+			spi-max-frequency = <1000000>;
+		};
+	};
+
 	switch_vtss: switch_vtss@e0000000 {
 		compatible = "mchp,lan969x-switch-appl";
 		reg = <0xe00c0000 0x0010000>,
@@ -181,6 +204,18 @@
 	/delete-property/ interrupts;
 	/delete-property/ interrupt-controller;
 	/delete-property/ #interrupt-cells;
+
+	/* Hold 74HC595 nSHIFT_RESET (MR) pin high (deasserted)
+	 *
+	 * This logic seems backwards, but setting output-low on
+	 * ACTIVE_LOW means the pin is held high (deasserted)
+	 */
+	power_shift_reset_hog {
+		gpio-hog;
+		gpios = <33 GPIO_ACTIVE_LOW>;
+		output-low;
+		line-name = "power-shift-nreset";
+	};
 };
 
 &sdmmc0 {
