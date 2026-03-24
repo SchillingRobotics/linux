@@ -347,6 +347,12 @@ static int ad7949_spi_probe(struct spi_device *spi)
 		return -EINVAL;
 	}
 
+	ret = spi_setup(spi);
+	if (ret < 0) {
+		dev_err(dev, "Error in SPI setup\n");
+		return ret;
+	}
+
 	/* Setup internal voltage reference */
 	tmp = 4096000;
 	device_property_read_u32(dev, "adi,internal-ref-microvolt", &tmp);

@@ -12,7 +12,6 @@
 	model = "lan969x appl ev23x71a (pcb8398)";
 	aliases {
 		serial0 = &usart0;
-		spi0 = &qspi0;
 		i2c0   = &i2c1;
 	};
 
@@ -79,13 +78,34 @@
 	spi2: spi@400 {
 		pinctrl-0 = <&fc2_pins>;
 		pinctrl-names = "default";
-		cs-gpios = <&gpio 63 GPIO_ACTIVE_LOW>;
+		cs-gpios = <&gpio 57 GPIO_ACTIVE_LOW>,
+			   <&gpio 58 GPIO_ACTIVE_LOW>,
+			   <&gpio 59 GPIO_ACTIVE_LOW>;
+		num-cs = <3>;
 		status = "okay";
 
 		spi@0 {
-			compatible = "mchp,synce_dpll";
+			compatible = "adi,ad7689";
 			reg = <0>;
-			spi-max-frequency = <8000000>;
+			spi-max-frequency = <10000000>;
+			spi-bits-per-word = <16>;
+			status = "okay";
+		};
+
+		spi@1 {
+			compatible = "adi,ad7689";
+			reg = <1>;
+			spi-max-frequency = <10000000>;
+			spi-bits-per-word = <16>;
+			status = "okay";
+		};
+
+		spi@2 {
+			compatible = "adi,ad7689";
+			reg = <2>;
+			spi-max-frequency = <10000000>;
+			spi-bits-per-word = <16>;
+			status = "okay";
 		};
 	};
 };
@@ -114,7 +134,7 @@
 	};
 
 	fc2_pins: fc2-pins {
-		pins = "GPIO_64", "GPIO_65", "GPIO_66";
+		pins = "GPIO_54", "GPIO_55", "GPIO_56";
 		function = "fc";
 	};
 
@@ -156,21 +176,6 @@
 	/delete-property/ interrupts;
 	/delete-property/ interrupt-controller;
 	/delete-property/ #interrupt-cells;
-};
-
-&qspi0 {
-	status = "okay";
-
-	spi-flash@0 {
-		compatible = "jedec,spi-nor";
-		reg = <0>;
-		spi-max-frequency = <104000000>;
-		#address-cells = <1>;
-		#size-cells = <1>;
-		spi-tx-bus-width = <1>;
-		spi-rx-bus-width = <4>;
-		m25p,fast-read;
-	};
 };
 
 &sdmmc0 {
