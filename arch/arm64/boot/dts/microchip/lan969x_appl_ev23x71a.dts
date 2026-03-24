@@ -13,19 +13,35 @@
 	aliases {
 		serial0 = &usart0;
 		i2c0   = &i2c1;
+//		i2c100 = &i2c_sfp0;
+//		i2c101 = &i2c_sfp1;
 	};
 
 	chosen {
 		stdout-path = "serial0:115200n8";
 	};
 
-	gpio-restart {
-		compatible = "gpio-restart";
-		gpios = <&gpio 60 GPIO_ACTIVE_LOW>;
-		open-source;
-		priority = <200>;
+/*
+	i2c_sfp0: i2c-sfp0 {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpio 61 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpio 60 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
 	};
 
+	i2c_sfp1: i2c-sfp1 {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpio 36 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpio 60 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+	};
+*/
 	switch_vtss: switch_vtss@e0000000 {
 		compatible = "mchp,lan969x-switch-appl";
 		reg = <0xe00c0000 0x0010000>,
@@ -136,17 +152,6 @@
 	fc2_pins: fc2-pins {
 		pins = "GPIO_54", "GPIO_55", "GPIO_56";
 		function = "fc";
-	};
-
-	fc3_pins: fc3-pins {
-		pins = "GPIO_55", "GPIO_56";
-		function = "fc";
-	};
-
-	sgpio_pins: sgpio-pins {
-		/* SCK, D0, D1, LD */
-		pins = "GPIO_5", "GPIO_6", "GPIO_7", "GPIO_8";
-		function = "sgpio_a";
 	};
 
 	usb_ulpi_pins: usb-ulpi-pins {
