@@ -13,7 +13,7 @@
 	aliases {
 		serial0 = &usart0;
 		i2c0   = &i2c1;
-//		i2c100 = &i2c_sfp0;
+		i2c100 = &i2c_sfp0;
 //		i2c101 = &i2c_sfp1;
 	};
 
@@ -21,7 +21,6 @@
 		stdout-path = "serial0:115200n8";
 	};
 
-/*
 	i2c_sfp0: i2c-sfp0 {
 		compatible = "i2c-gpio";
 		sda-gpios = <&gpio 61 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
@@ -32,16 +31,16 @@
 		status = "okay";
 	};
 
-	i2c_sfp1: i2c-sfp1 {
-		compatible = "i2c-gpio";
-		sda-gpios = <&gpio 36 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		scl-gpios = <&gpio 60 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		i2c-gpio,delay-us = <2>;
-		#address-cells = <1>;
-		#size-cells = <0>;
-		status = "okay";
-	};
-*/
+//	i2c_sfp1: i2c-sfp1 {
+//		compatible = "i2c-gpio";
+//		sda-gpios = <&gpio 36 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+//		/* TODO: Update SCL GPIO after hardware rework adds second SCL signal */
+//		scl-gpios = <&gpio 60 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+//		i2c-gpio,delay-us = <2>;
+//		#address-cells = <1>;
+//		#size-cells = <0>;
+//		status = "okay";
+//	};
 
 	/* 24V port power control via two daisy-chained 74HC595 shift registers */
 	spi_port_power: spi-gpio-power {
