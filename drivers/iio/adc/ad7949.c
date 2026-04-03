@@ -4,10 +4,17 @@
  * Copyright (C) 2018 CMC NV
  *
  * https://www.analog.com/media/en/technical-documentation/data-sheets/AD7949.pdf
+ *
+ * Software fuse extension: optional fast kernel-side polling + GPIO trip.
+ * Configured via DTS properties: trip-gpios, fuse-threshold, fuse-poll-hz.
+ * Sysfs attrs: fuse_enable, fuse_threshold, fuse_poll_hz, fuse_fault_mask,
+ *              fuse_fault_clear, fuse_consec_count.
  */
 
 #include <linux/delay.h>
+#include <linux/gpio/consumer.h>
 #include <linux/iio/iio.h>
+#include <linux/kthread.h>
 #include <linux/module.h>
 #include <linux/regulator/consumer.h>
 #include <linux/spi/spi.h>
@@ -76,6 +83,15 @@ static const struct ad7949_adc_spec ad7949_adc_spec[] = {
  * @current_channel: current channel in use
  * @buffer: buffer to send / receive data to / from device
  * @buf8b: be16 buffer to exchange data with the device in 8-bit transfers
+ * @num_channels: number of ADC channels
+ * @fuse_gpios: optional trip GPIOs (one per channel)
+ * @fuse_threshold: ADC raw count above which a channel trips
+ * @fuse_poll_hz: polling rate in Hz for the fuse kthread
+ * @fuse_consec_count: consecutive over-threshold readings required to trip
+ * @fuse_enable: whether the fuse polling thread is active
+ * @fuse_fault_mask: bitmask of tripped channels
+ * @fuse_thread: kthread for polling
+ * @fuse_last_raw: last raw ADC reading per channel (for sysfs)
  */
 struct ad7949_adc_chip {
 	struct mutex lock;
@@ -88,6 +104,17 @@ struct ad7949_adc_chip {
 	unsigned int current_channel;
 	u16 buffer __aligned(IIO_DMA_MINALIGN);
 	__be16 buf8b;
+	u8 num_channels;
+
+	/* Software fuse fields */
+	struct gpio_descs *fuse_gpios;
+	u32 fuse_threshold;
+	u32 fuse_poll_hz;
+	u32 fuse_consec_count;
+	bool fuse_enable;
+	u32 fuse_fault_mask;
+	struct task_struct *fuse_thread;
+	u16 fuse_last_raw[8];
 };
 
 static int ad7949_spi_write_cfg(struct ad7949_adc_chip *ad7949_adc, u16 val,
@@ -186,6 +213,184 @@ static int ad7949_spi_read_channel(struct ad7949_adc_chip *ad7949_adc, int *val,
 	return 0;
 }
 
+/*
+ * Scan all channels using a batched spi_message with cs_change between
+ * transfers. Each transfer sends the config for the next channel and reads
+ * the result of the previous conversion (AD7689 pipeline). This minimises
+ * SPI framework overhead: one mutex lock, one message, N+1 transfers.
+ *
+ * results[] must have room for ad7949_adc->num_channels entries.
+ * Caller must hold ad7949_adc->lock.
+ */
+static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
+				    u16 *results)
+{
+	int nch = ad7949_adc->num_channels;
+	/* N+1 transfers: prime + N reads */
+	int nxfers = nch + 1;
+	struct spi_transfer *xfers;
+	u16 *tx_bufs, *rx_bufs;
+	struct spi_message msg;
+	int shift = 16 - ad7949_adc->resolution;
+	u16 base_cfg;
+	int i, ret;
+
+	xfers = kcalloc(nxfers, sizeof(*xfers), GFP_KERNEL);
+	if (!xfers)
+		return -ENOMEM;
+
+	tx_bufs = kcalloc(nxfers, sizeof(u16), GFP_KERNEL);
+	rx_bufs = kcalloc(nxfers, sizeof(u16), GFP_KERNEL);
+	if (!tx_bufs || !rx_bufs) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	/* Build base config matching current settings, with CFG overwrite set */
+	base_cfg = ad7949_adc->cfg | AD7949_CFG_MASK_OVERWRITE;
+
+	spi_message_init(&msg);
+
+	for (i = 0; i < nxfers; i++) {
+		int target_ch;
+
+		if (i < nch)
+			target_ch = i;
+		else
+			target_ch = nch - 1; /* repeat last for final read */
+
+		tx_bufs[i] = (base_cfg & ~AD7949_CFG_MASK_INX) |
+			     FIELD_PREP(AD7949_CFG_MASK_INX, target_ch);
+
+		switch (ad7949_adc->spi->bits_per_word) {
+		case 16:
+			tx_bufs[i] <<= 2;
+			break;
+		case 14:
+			break;
+		case 8:
+			tx_bufs[i] = cpu_to_be16(tx_bufs[i] << 2);
+			break;
+		}
+
+		xfers[i].tx_buf = &tx_bufs[i];
+		xfers[i].rx_buf = &rx_bufs[i];
+		xfers[i].len = 2;
+		xfers[i].cs_change = 1; /* deassert CS between transfers */
+		xfers[i].cs_change_delay.value = 4;
+		xfers[i].cs_change_delay.unit = SPI_DELAY_UNIT_USECS;
+
+		spi_message_add_tail(&xfers[i], &msg);
+	}
+
+	/* Last transfer: don't deassert CS needlessly */
+	xfers[nxfers - 1].cs_change = 0;
+
+	ret = spi_sync(ad7949_adc->spi, &msg);
+	if (ret)
+		goto out;
+
+	/*
+	 * Pipeline: xfers[0] is prime (discard), xfers[1..N] have ch0..ch(N-1)
+	 */
+	for (i = 0; i < nch; i++) {
+		u16 raw = rx_bufs[i + 1];
+
+		switch (ad7949_adc->spi->bits_per_word) {
+		case 16:
+			raw >>= shift;
+			break;
+		case 14:
+			raw &= GENMASK(13, 0);
+			break;
+		case 8:
+			raw = be16_to_cpu(raw);
+			raw >>= shift;
+			break;
+		}
+		results[i] = raw;
+	}
+
+	/* Update current_channel so single-channel reads stay efficient */
+	ad7949_adc->current_channel = nch - 1;
+
+out:
+	kfree(rx_bufs);
+	kfree(tx_bufs);
+	kfree(xfers);
+	return ret;
+}
+
+/*
+ * Software fuse kthread: polls all channels, trips GPIOs on overcurrent.
+ */
+static int ad7949_fuse_thread_fn(void *data)
+{
+	struct ad7949_adc_chip *ad7949_adc = data;
+	u16 results[8];
+	u8 consec[8] = {};
+	int nch = ad7949_adc->num_channels;
+	struct gpio_descs *gpios = ad7949_adc->fuse_gpios;
+	unsigned long sleep_us;
+	int i, ret;
+
+	dev_info(&ad7949_adc->spi->dev,
+		 "fuse thread started: threshold=%u poll_hz=%u consec=%u\n",
+		 ad7949_adc->fuse_threshold,
+		 ad7949_adc->fuse_poll_hz,
+		 ad7949_adc->fuse_consec_count);
+
+	while (!kthread_should_stop()) {
+		if (!ad7949_adc->fuse_enable) {
+			msleep(100);
+			continue;
+		}
+
+		sleep_us = ad7949_adc->fuse_poll_hz ?
+			   1000000UL / ad7949_adc->fuse_poll_hz : 100000;
+
+		mutex_lock(&ad7949_adc->lock);
+		ret = ad7949_scan_all_channels(ad7949_adc, results);
+		mutex_unlock(&ad7949_adc->lock);
+
+		if (ret) {
+			usleep_range(sleep_us, sleep_us + sleep_us / 10);
+			continue;
+		}
+
+		for (i = 0; i < nch && i < 8; i++) {
+			ad7949_adc->fuse_last_raw[i] = results[i];
+
+			/* Skip already-tripped channels */
+			if (ad7949_adc->fuse_fault_mask & BIT(i))
+				continue;
+
+			if (results[i] > ad7949_adc->fuse_threshold) {
+				consec[i]++;
+				if (consec[i] >= ad7949_adc->fuse_consec_count) {
+					/* Trip: turn off port power */
+					if (gpios && i < gpios->ndescs) {
+						gpiod_set_value_cansleep(
+							gpios->desc[i], 0);
+						ad7949_adc->fuse_fault_mask |= BIT(i);
+						dev_warn(&ad7949_adc->spi->dev,
+							 "fuse trip ch%d raw=%u thresh=%u\n",
+							 i, results[i],
+							 ad7949_adc->fuse_threshold);
+					}
+					consec[i] = 0;
+				}
+			} else {
+				consec[i] = 0;
+			}
+		}
+
+		usleep_range(sleep_us, sleep_us + sleep_us / 10);
+	}
+
+	return 0;
+}
+
 #define AD7949_ADC_CHANNEL(chan) {				\
 	.type = IIO_VOLTAGE,					\
 	.indexed = 1,						\
@@ -273,6 +478,186 @@ static const struct iio_info ad7949_spi_info = {
 	.debugfs_reg_access = ad7949_spi_reg_access,
 };
 
+/* ---- Software fuse sysfs attributes ---- */
+
+static ssize_t fuse_enable_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+
+	return sysfs_emit(buf, "%d\n", ad7949_adc->fuse_enable ? 1 : 0);
+}
+
+static ssize_t fuse_enable_store(struct device *dev,
+				 struct device_attribute *attr,
+				 const char *buf, size_t len)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+	bool val;
+
+	if (kstrtobool(buf, &val))
+		return -EINVAL;
+
+	ad7949_adc->fuse_enable = val;
+	return len;
+}
+static DEVICE_ATTR_RW(fuse_enable);
+
+static ssize_t fuse_threshold_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+
+	return sysfs_emit(buf, "%u\n", ad7949_adc->fuse_threshold);
+}
+
+static ssize_t fuse_threshold_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t len)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+	u32 val;
+
+	if (kstrtou32(buf, 0, &val))
+		return -EINVAL;
+
+	ad7949_adc->fuse_threshold = val;
+	return len;
+}
+static DEVICE_ATTR_RW(fuse_threshold);
+
+static ssize_t fuse_poll_hz_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+
+	return sysfs_emit(buf, "%u\n", ad7949_adc->fuse_poll_hz);
+}
+
+static ssize_t fuse_poll_hz_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t len)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+	u32 val;
+
+	if (kstrtou32(buf, 0, &val))
+		return -EINVAL;
+	if (val > 20000)
+		val = 20000; /* cap at 20kHz */
+
+	ad7949_adc->fuse_poll_hz = val;
+	return len;
+}
+static DEVICE_ATTR_RW(fuse_poll_hz);
+
+static ssize_t fuse_consec_count_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+
+	return sysfs_emit(buf, "%u\n", ad7949_adc->fuse_consec_count);
+}
+
+static ssize_t fuse_consec_count_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t len)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+	u32 val;
+
+	if (kstrtou32(buf, 0, &val))
+		return -EINVAL;
+	if (val < 1)
+		val = 1;
+
+	ad7949_adc->fuse_consec_count = val;
+	return len;
+}
+static DEVICE_ATTR_RW(fuse_consec_count);
+
+static ssize_t fuse_fault_mask_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+
+	return sysfs_emit(buf, "0x%02x\n", ad7949_adc->fuse_fault_mask);
+}
+static DEVICE_ATTR_RO(fuse_fault_mask);
+
+static ssize_t fuse_fault_clear_store(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t len)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+	u32 mask;
+
+	if (kstrtou32(buf, 0, &mask))
+		return -EINVAL;
+
+	ad7949_adc->fuse_fault_mask &= ~mask;
+	return len;
+}
+static DEVICE_ATTR_WO(fuse_fault_clear);
+
+static ssize_t fuse_last_raw_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+	int i, n = 0;
+
+	for (i = 0; i < ad7949_adc->num_channels && i < 8; i++)
+		n += sysfs_emit_at(buf, n, "%u%s", ad7949_adc->fuse_last_raw[i],
+				   i < ad7949_adc->num_channels - 1 ? " " : "\n");
+	return n;
+}
+static DEVICE_ATTR_RO(fuse_last_raw);
+
+static struct attribute *ad7949_fuse_attrs[] = {
+	&dev_attr_fuse_enable.attr,
+	&dev_attr_fuse_threshold.attr,
+	&dev_attr_fuse_poll_hz.attr,
+	&dev_attr_fuse_consec_count.attr,
+	&dev_attr_fuse_fault_mask.attr,
+	&dev_attr_fuse_fault_clear.attr,
+	&dev_attr_fuse_last_raw.attr,
+	NULL,
+};
+
+static umode_t ad7949_fuse_attrs_visible(struct kobject *kobj,
+					  struct attribute *attr, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+
+	/* Only show fuse attrs if trip-gpios were specified in DTS */
+	if (!ad7949_adc->fuse_gpios)
+		return 0;
+	return attr->mode;
+}
+
+static const struct attribute_group ad7949_fuse_attr_group = {
+	.attrs = ad7949_fuse_attrs,
+	.is_visible = ad7949_fuse_attrs_visible,
+};
+
+static const struct attribute_group *ad7949_attr_groups[] = {
+	&ad7949_fuse_attr_group,
+	NULL,
+};
+
 static int ad7949_spi_init(struct ad7949_adc_chip *ad7949_adc)
 {
 	int ret;
@@ -333,6 +718,7 @@ static int ad7949_spi_probe(struct spi_device *spi)
 
 	spec = &ad7949_adc_spec[spi_get_device_id(spi)->driver_data];
 	indio_dev->num_channels = spec->num_channels;
+	ad7949_adc->num_channels = spec->num_channels;
 	ad7949_adc->resolution = spec->resolution;
 
 	/* Set SPI bits per word */
@@ -409,11 +795,72 @@ static int ad7949_spi_probe(struct spi_device *spi)
 		return ret;
 	}
 
+	/* Software fuse: optional DTS-driven fast polling + GPIO trip */
+	ad7949_adc->fuse_gpios = devm_gpiod_get_array_optional(dev, "trip",
+								GPIOD_OUT_HIGH);
+	if (IS_ERR(ad7949_adc->fuse_gpios)) {
+		ret = PTR_ERR(ad7949_adc->fuse_gpios);
+		ad7949_adc->fuse_gpios = NULL;
+		if (ret != -ENOENT) {
+			dev_err(dev, "failed to get trip-gpios: %d\n", ret);
+			return ret;
+		}
+	}
+
+	// TODO(Trevor): Update the default fuse parameters (threshold, poll rate, consecutive count) based on measured values and desired trip behavior
+	//               For now, these are just placeholders that can be overridden via DTS or sysfs.
+	if (ad7949_adc->fuse_gpios) {
+		ad7949_adc->fuse_threshold = 2000;
+		device_property_read_u32(dev, "fuse-threshold",
+					 &ad7949_adc->fuse_threshold);
+
+		ad7949_adc->fuse_poll_hz = 2000;
+		device_property_read_u32(dev, "fuse-poll-hz",
+					 &ad7949_adc->fuse_poll_hz);
+
+		ad7949_adc->fuse_consec_count = 3;
+		device_property_read_u32(dev, "fuse-consec-count",
+					 &ad7949_adc->fuse_consec_count);
+		if (ad7949_adc->fuse_consec_count < 1)
+			ad7949_adc->fuse_consec_count = 1;
+
+		ad7949_adc->fuse_enable = true;
+		ad7949_adc->fuse_fault_mask = 0;
+
+		ad7949_adc->fuse_thread = kthread_run(
+			ad7949_fuse_thread_fn, ad7949_adc,
+			"ad7949-fuse-%s", dev_name(dev));
+		if (IS_ERR(ad7949_adc->fuse_thread)) {
+			ret = PTR_ERR(ad7949_adc->fuse_thread);
+			ad7949_adc->fuse_thread = NULL;
+			dev_err(dev, "failed to start fuse thread: %d\n", ret);
+			return ret;
+		}
+
+		dev_info(dev, "software fuse: %d gpios, threshold=%u, poll=%uHz, consec=%u\n",
+			 ad7949_adc->fuse_gpios->ndescs,
+			 ad7949_adc->fuse_threshold,
+			 ad7949_adc->fuse_poll_hz,
+			 ad7949_adc->fuse_consec_count);
+	}
+
+	/* Attach fuse sysfs attr group */
+	indio_dev->dev.groups = ad7949_attr_groups;
+
 	ret = devm_iio_device_register(dev, indio_dev);
 	if (ret)
 		dev_err(dev, "fail to register iio device: %d\n", ret);
 
 	return ret;
+}
+
+static void ad7949_spi_remove(struct spi_device *spi)
+{
+	struct iio_dev *indio_dev = spi_get_drvdata(spi);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+
+	if (ad7949_adc->fuse_thread)
+		kthread_stop(ad7949_adc->fuse_thread);
 }
 
 static const struct of_device_id ad7949_spi_of_id[] = {
@@ -438,6 +885,7 @@ static struct spi_driver ad7949_spi_driver = {
 		.of_match_table	= ad7949_spi_of_id,
 	},
 	.probe	  = ad7949_spi_probe,
+	.remove	  = ad7949_spi_remove,
 	.id_table = ad7949_spi_id,
 };
 module_spi_driver(ad7949_spi_driver);

@@ -122,25 +122,48 @@
 		num-cs = <3>;
 		status = "okay";
 
-		spi@0 {
+		adc0: adc@0 {
 			compatible = "adi,ad7689";
 			reg = <0>;
 			spi-max-frequency = <10000000>;
-			status = "okay";
+
+			/* Software fuse: trip GPIOs from 74HC595 shift register */
+			trip-gpios = <&port_power 0 GPIO_ACTIVE_HIGH>,
+				     <&port_power 1 GPIO_ACTIVE_HIGH>,
+				     <&port_power 2 GPIO_ACTIVE_HIGH>,
+				     <&port_power 3 GPIO_ACTIVE_HIGH>,
+				     <&port_power 4 GPIO_ACTIVE_HIGH>,
+				     <&port_power 5 GPIO_ACTIVE_HIGH>,
+				     <&port_power 6 GPIO_ACTIVE_HIGH>,
+				     <&port_power 7 GPIO_ACTIVE_HIGH>;
+			fuse-threshold = <2000>;
+			fuse-poll-hz = <2000>;
+			fuse-consec-count = <3>;
 		};
 
-		spi@1 {
+		adc1: adc@1 {
 			compatible = "adi,ad7689";
 			reg = <1>;
 			spi-max-frequency = <10000000>;
-			status = "okay";
+
+			trip-gpios = <&port_power 8 GPIO_ACTIVE_HIGH>,
+				     <&port_power 9 GPIO_ACTIVE_HIGH>,
+				     <&port_power 10 GPIO_ACTIVE_HIGH>,
+				     <&port_power 11 GPIO_ACTIVE_HIGH>,
+				     <&port_power 12 GPIO_ACTIVE_HIGH>,
+				     <&port_power 13 GPIO_ACTIVE_HIGH>,
+				     <&port_power 14 GPIO_ACTIVE_HIGH>,
+				     <&port_power 15 GPIO_ACTIVE_HIGH>;
+			fuse-threshold = <2000>;
+			fuse-poll-hz = <2000>;
+			fuse-consec-count = <3>;
 		};
 
-		spi@2 {
+		adc2: adc@2 {
 			compatible = "adi,ad7689";
 			reg = <2>;
 			spi-max-frequency = <10000000>;
-			status = "okay";
+			/* Bus voltage monitoring only — no fuse trip GPIOs */
 		};
 	};
 };
