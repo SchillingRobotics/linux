@@ -117,6 +117,12 @@ struct ad7949_adc_chip {
 	u32 port_power_mask;  /* bitmask: 1=ON, 0=OFF. Written by userspace + fuse */
 	struct task_struct *fuse_thread;
 	u16 fuse_last_raw[8];
+
+	/* Pre-allocated scan buffers (max 8 channels + 2 pipeline flushes) */
+#define AD7949_MAX_XFERS 10
+	struct spi_transfer scan_xfers[AD7949_MAX_XFERS];
+	u16 scan_tx[AD7949_MAX_XFERS];
+	u16 scan_rx[AD7949_MAX_XFERS];
 };
 
 static int ad7949_spi_write_cfg(struct ad7949_adc_chip *ad7949_adc, u16 val,
@@ -230,25 +236,20 @@ static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
 	int nch = ad7949_adc->num_channels;
 	/* N+2 transfers: 2 primes + N reads (AD7689 pipeline is 2 deep) */
 	int nxfers = nch + 2;
-	struct spi_transfer *xfers;
-	u16 *tx_bufs, *rx_bufs;
+	struct spi_transfer *xfers = ad7949_adc->scan_xfers;
+	u16 *tx_bufs = ad7949_adc->scan_tx;
+	u16 *rx_bufs = ad7949_adc->scan_rx;
 	struct spi_message msg;
 	int shift = 16 - ad7949_adc->resolution;
 	u16 base_cfg;
 	int i, ret;
 
-	xfers = kcalloc(nxfers, sizeof(*xfers), GFP_KERNEL);
+	if (nxfers > AD7949_MAX_XFERS)
+		return -EINVAL;
 
-	xfers = kcalloc(nxfers, sizeof(*xfers), GFP_KERNEL);
-	if (!xfers)
-		return -ENOMEM;
-
-	tx_bufs = kcalloc(nxfers, sizeof(u16), GFP_KERNEL);
-	rx_bufs = kcalloc(nxfers, sizeof(u16), GFP_KERNEL);
-	if (!tx_bufs || !rx_bufs) {
-		ret = -ENOMEM;
-		goto out;
-	}
+	memset(xfers, 0, nxfers * sizeof(*xfers));
+	memset(tx_bufs, 0, nxfers * sizeof(u16));
+	memset(rx_bufs, 0, nxfers * sizeof(u16));
 
 	/* Build base config matching current settings, with CFG overwrite set */
 	base_cfg = ad7949_adc->cfg | AD7949_CFG_MASK_OVERWRITE;
@@ -305,7 +306,7 @@ static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
 
 	ret = spi_sync(ad7949_adc->spi, &msg);
 	if (ret)
-		goto out;
+		return ret;
 
 	/*
 	 * Pipeline: xfers[0..1] are prime (discard), xfers[2..N+1] have ch0..ch(N-1)
@@ -331,10 +332,6 @@ static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
 	/* Update current_channel so single-channel reads stay efficient */
 	ad7949_adc->current_channel = nch - 1;
 
-out:
-	kfree(rx_bufs);
-	kfree(tx_bufs);
-	kfree(xfers);
 	return ret;
 }
 
