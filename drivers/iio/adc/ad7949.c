@@ -17,6 +17,7 @@
 #include <linux/iio/iio.h>
 #include <linux/kthread.h>
 #include <linux/module.h>
+#include <linux/sched/rt.h>
 #include <linux/regulator/consumer.h>
 #include <linux/spi/spi.h>
 #include <linux/bitfield.h>
@@ -346,7 +347,6 @@ static int ad7949_fuse_thread_fn(void *data)
 	int nch = ad7949_adc->num_channels;
 	struct gpio_descs *gpios = ad7949_adc->fuse_gpios;
 	unsigned long sleep_us;
-	bool tripped = false;
 	int i, ret;
 
 	dev_info(&ad7949_adc->spi->dev,
@@ -387,7 +387,7 @@ static int ad7949_fuse_thread_fn(void *data)
 					if (gpios && i < gpios->ndescs) {
 						ad7949_adc->fuse_fault_mask |= BIT(i);
 						ad7949_adc->port_power_mask &= ~BIT(i);
-						tripped = true;
+						gpiod_set_value_cansleep(gpios->desc[i], 0);
 						dev_warn(&ad7949_adc->spi->dev,
 							 "fuse trip ch%d raw=%u thresh=%u\n",
 							 i, results[i],
@@ -398,17 +398,6 @@ static int ad7949_fuse_thread_fn(void *data)
 			} else {
 				consec[i] = 0;
 			}
-		}
-
-		/* Apply all GPIO changes at once after processing all channels */
-		if (tripped && gpios) {
-			DECLARE_BITMAP(values, 8);
-			values[0] = ad7949_adc->port_power_mask;
-			gpiod_set_array_value_cansleep(gpios->ndescs,
-						       gpios->desc,
-						       gpios->info,
-						       values);
-			tripped = false;
 		}
 
 		usleep_range(sleep_us, sleep_us + sleep_us / 10);
@@ -906,6 +895,8 @@ static int ad7949_spi_probe(struct spi_device *spi)
 			dev_err(dev, "failed to start fuse thread: %d\n", ret);
 			return ret;
 		}
+
+		sched_set_fifo(ad7949_adc->fuse_thread);
 
 		dev_info(dev, "software fuse: %d gpios, threshold=%u, poll=%uHz, consec=%u\n",
 			 ad7949_adc->fuse_gpios->ndescs,
