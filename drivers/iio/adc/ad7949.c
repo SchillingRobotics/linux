@@ -113,6 +113,7 @@ struct ad7949_adc_chip {
 	u32 fuse_consec_count;
 	bool fuse_enable;
 	u32 fuse_fault_mask;
+	u32 port_power_mask;  /* bitmask: 1=ON, 0=OFF. Written by userspace + fuse */
 	struct task_struct *fuse_thread;
 	u16 fuse_last_raw[8];
 };
@@ -373,6 +374,7 @@ static int ad7949_fuse_thread_fn(void *data)
 						gpiod_set_value_cansleep(
 							gpios->desc[i], 0);
 						ad7949_adc->fuse_fault_mask |= BIT(i);
+						ad7949_adc->port_power_mask &= ~BIT(i);
 						dev_warn(&ad7949_adc->spi->dev,
 							 "fuse trip ch%d raw=%u thresh=%u\n",
 							 i, results[i],
@@ -624,6 +626,44 @@ static ssize_t fuse_last_raw_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(fuse_last_raw);
 
+static ssize_t port_power_show(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+
+	return sysfs_emit(buf, "0x%02x\n", ad7949_adc->port_power_mask);
+}
+
+static ssize_t port_power_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t len)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+	struct gpio_descs *gpios = ad7949_adc->fuse_gpios;
+	u32 new_mask;
+	int i;
+
+	if (kstrtou32(buf, 0, &new_mask))
+		return -EINVAL;
+
+	if (!gpios)
+		return -ENODEV;
+
+	for (i = 0; i < gpios->ndescs && i < 8; i++) {
+		int want = (new_mask >> i) & 1;
+		int had  = (ad7949_adc->port_power_mask >> i) & 1;
+
+		if (want != had)
+			gpiod_set_value_cansleep(gpios->desc[i], want);
+	}
+
+	ad7949_adc->port_power_mask = new_mask;
+	return len;
+}
+static DEVICE_ATTR_RW(port_power);
+
 static struct attribute *ad7949_fuse_attrs[] = {
 	&dev_attr_fuse_enable.attr,
 	&dev_attr_fuse_threshold.attr,
@@ -632,6 +672,7 @@ static struct attribute *ad7949_fuse_attrs[] = {
 	&dev_attr_fuse_fault_mask.attr,
 	&dev_attr_fuse_fault_clear.attr,
 	&dev_attr_fuse_last_raw.attr,
+	&dev_attr_port_power.attr,
 	NULL,
 };
 
@@ -826,6 +867,8 @@ static int ad7949_spi_probe(struct spi_device *spi)
 
 		ad7949_adc->fuse_enable = true;
 		ad7949_adc->fuse_fault_mask = 0;
+		ad7949_adc->port_power_mask =
+			(1U << ad7949_adc->fuse_gpios->ndescs) - 1;
 
 		ad7949_adc->fuse_thread = kthread_run(
 			ad7949_fuse_thread_fn, ad7949_adc,
