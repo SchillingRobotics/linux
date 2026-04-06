@@ -259,23 +259,22 @@ static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
 		int target_ch;
 
 		/*
-		 * AD7689 pipeline is 2 deep: xfer[0] and xfer[1] both select
-		 * channel 0 (two priming transfers). xfer[2..N+1] advance
-		 * through channels, with the last transfer repeating ch(N-1)
-		 * to flush the final result out of the pipeline.
+		 * AD7689 pipeline is 2 deep: the result read during xfer K
+		 * is from the CFG written during xfer K-2.  We need N+2
+		 * transfers total: N transfers that advance through channels
+		 * 0..N-1 plus 2 trailing repeats to flush the pipeline.
 		 *
-		 *   xfer[0] → CFG ch0, rx garbage
-		 *   xfer[1] → CFG ch0, rx garbage (pipeline primed)
-		 *   xfer[2] → CFG ch1, rx ch0
-		 *   xfer[k] → CFG ch(k-1), rx ch(k-2)   for k=2..N
+		 *   xfer[0]   → CFG ch0,     rx garbage
+		 *   xfer[1]   → CFG ch1,     rx garbage
+		 *   xfer[2]   → CFG ch2,     rx ch0
+		 *   xfer[k]   → CFG ch(k),   rx ch(k-2)    for k < N
+		 *   xfer[N]   → CFG ch(N-1), rx ch(N-2)
 		 *   xfer[N+1] → CFG ch(N-1), rx ch(N-1)
 		 */
-		if (i <= 1)
-			target_ch = 0; /* two priming transfers */
-		else if (i - 1 < nch)
-			target_ch = i - 1;
+		if (i < nch)
+			target_ch = i;
 		else
-			target_ch = nch - 1; /* repeat last for final read */
+			target_ch = nch - 1;
 
 		tx_bufs[i] = (base_cfg & ~AD7949_CFG_MASK_INX) |
 			     FIELD_PREP(AD7949_CFG_MASK_INX, target_ch);
