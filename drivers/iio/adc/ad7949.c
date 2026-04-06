@@ -836,7 +836,7 @@ static int ad7949_spi_probe(struct spi_device *spi)
 
 	/* Software fuse: optional DTS-driven fast polling + GPIO trip */
 	ad7949_adc->fuse_gpios = devm_gpiod_get_array_optional(dev, "trip",
-								GPIOD_OUT_HIGH);
+								GPIOD_OUT_LOW);
 	if (IS_ERR(ad7949_adc->fuse_gpios)) {
 		ret = PTR_ERR(ad7949_adc->fuse_gpios);
 		dev_info(dev, "trip-gpios error: %d\n", ret);
@@ -871,8 +871,7 @@ static int ad7949_spi_probe(struct spi_device *spi)
 
 		ad7949_adc->fuse_enable = true;
 		ad7949_adc->fuse_fault_mask = 0;
-		ad7949_adc->port_power_mask =
-			(1U << ad7949_adc->fuse_gpios->ndescs) - 1;
+		ad7949_adc->port_power_mask = 0;
 
 		ad7949_adc->fuse_thread = kthread_run(
 			ad7949_fuse_thread_fn, ad7949_adc,
