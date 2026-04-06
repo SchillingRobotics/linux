@@ -219,7 +219,7 @@ static int ad7949_spi_read_channel(struct ad7949_adc_chip *ad7949_adc, int *val,
  * Scan all channels using a batched spi_message with cs_change between
  * transfers. Each transfer sends the config for the next channel and reads
  * the result of the previous conversion (AD7689 pipeline). This minimises
- * SPI framework overhead: one mutex lock, one message, N+1 transfers.
+ * SPI framework overhead: one mutex lock, one message, N+2 transfers.
  *
  * results[] must have room for ad7949_adc->num_channels entries.
  * Caller must hold ad7949_adc->lock.
@@ -228,14 +228,16 @@ static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
 				    u16 *results)
 {
 	int nch = ad7949_adc->num_channels;
-	/* N+1 transfers: prime + N reads */
-	int nxfers = nch + 1;
+	/* N+2 transfers: 2 primes + N reads (AD7689 pipeline is 2 deep) */
+	int nxfers = nch + 2;
 	struct spi_transfer *xfers;
 	u16 *tx_bufs, *rx_bufs;
 	struct spi_message msg;
 	int shift = 16 - ad7949_adc->resolution;
 	u16 base_cfg;
 	int i, ret;
+
+	xfers = kcalloc(nxfers, sizeof(*xfers), GFP_KERNEL);
 
 	xfers = kcalloc(nxfers, sizeof(*xfers), GFP_KERNEL);
 	if (!xfers)
@@ -256,8 +258,22 @@ static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
 	for (i = 0; i < nxfers; i++) {
 		int target_ch;
 
-		if (i < nch)
-			target_ch = i;
+		/*
+		 * AD7689 pipeline is 2 deep: xfer[0] and xfer[1] both select
+		 * channel 0 (two priming transfers). xfer[2..N+1] advance
+		 * through channels, with the last transfer repeating ch(N-1)
+		 * to flush the final result out of the pipeline.
+		 *
+		 *   xfer[0] → CFG ch0, rx garbage
+		 *   xfer[1] → CFG ch0, rx garbage (pipeline primed)
+		 *   xfer[2] → CFG ch1, rx ch0
+		 *   xfer[k] → CFG ch(k-1), rx ch(k-2)   for k=2..N
+		 *   xfer[N+1] → CFG ch(N-1), rx ch(N-1)
+		 */
+		if (i <= 1)
+			target_ch = 0; /* two priming transfers */
+		else if (i - 1 < nch)
+			target_ch = i - 1;
 		else
 			target_ch = nch - 1; /* repeat last for final read */
 
@@ -293,10 +309,10 @@ static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
 		goto out;
 
 	/*
-	 * Pipeline: xfers[0] is prime (discard), xfers[1..N] have ch0..ch(N-1)
+	 * Pipeline: xfers[0..1] are prime (discard), xfers[2..N+1] have ch0..ch(N-1)
 	 */
 	for (i = 0; i < nch; i++) {
-		u16 raw = rx_bufs[i + 1];
+		u16 raw = rx_bufs[i + 2];
 
 		switch (ad7949_adc->spi->bits_per_word) {
 		case 16:
