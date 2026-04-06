@@ -475,9 +475,12 @@ static int ad7949_spi_reg_access(struct iio_dev *indio_dev,
 	return ret;
 }
 
+static const struct attribute_group ad7949_fuse_attr_group;
+
 static const struct iio_info ad7949_spi_info = {
 	.read_raw = ad7949_spi_read_raw,
 	.debugfs_reg_access = ad7949_spi_reg_access,
+	.attrs = &ad7949_fuse_attr_group,
 };
 
 /* ---- Software fuse sysfs attributes ---- */
@@ -694,11 +697,6 @@ static const struct attribute_group ad7949_fuse_attr_group = {
 	.is_visible = ad7949_fuse_attrs_visible,
 };
 
-static const struct attribute_group *ad7949_attr_groups[] = {
-	&ad7949_fuse_attr_group,
-	NULL,
-};
-
 static int ad7949_spi_init(struct ad7949_adc_chip *ad7949_adc)
 {
 	int ret;
@@ -841,11 +839,17 @@ static int ad7949_spi_probe(struct spi_device *spi)
 								GPIOD_OUT_HIGH);
 	if (IS_ERR(ad7949_adc->fuse_gpios)) {
 		ret = PTR_ERR(ad7949_adc->fuse_gpios);
+		dev_info(dev, "trip-gpios error: %d\n", ret);
 		ad7949_adc->fuse_gpios = NULL;
 		if (ret != -ENOENT) {
 			dev_err(dev, "failed to get trip-gpios: %d\n", ret);
 			return ret;
 		}
+	} else if (ad7949_adc->fuse_gpios) {
+		dev_info(dev, "trip-gpios: got %d descriptors\n",
+			 ad7949_adc->fuse_gpios->ndescs);
+	} else {
+		dev_info(dev, "trip-gpios: property not found (optional, skipping)\n");
 	}
 
 	// TODO(Trevor): Update the default fuse parameters (threshold, poll rate, consecutive count) based on measured values and desired trip behavior
@@ -886,9 +890,6 @@ static int ad7949_spi_probe(struct spi_device *spi)
 			 ad7949_adc->fuse_poll_hz,
 			 ad7949_adc->fuse_consec_count);
 	}
-
-	/* Attach fuse sysfs attr group */
-	indio_dev->dev.groups = ad7949_attr_groups;
 
 	ret = devm_iio_device_register(dev, indio_dev);
 	if (ret)
