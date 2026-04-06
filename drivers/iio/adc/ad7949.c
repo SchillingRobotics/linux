@@ -11,6 +11,7 @@
  *              fuse_fault_clear, fuse_consec_count.
  */
 
+#include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/iio/iio.h>
@@ -333,6 +334,7 @@ static int ad7949_fuse_thread_fn(void *data)
 	int nch = ad7949_adc->num_channels;
 	struct gpio_descs *gpios = ad7949_adc->fuse_gpios;
 	unsigned long sleep_us;
+	bool tripped = false;
 	int i, ret;
 
 	dev_info(&ad7949_adc->spi->dev,
@@ -371,10 +373,9 @@ static int ad7949_fuse_thread_fn(void *data)
 				if (consec[i] >= ad7949_adc->fuse_consec_count) {
 					/* Trip: turn off port power */
 					if (gpios && i < gpios->ndescs) {
-						gpiod_set_value_cansleep(
-							gpios->desc[i], 0);
 						ad7949_adc->fuse_fault_mask |= BIT(i);
 						ad7949_adc->port_power_mask &= ~BIT(i);
+						tripped = true;
 						dev_warn(&ad7949_adc->spi->dev,
 							 "fuse trip ch%d raw=%u thresh=%u\n",
 							 i, results[i],
@@ -385,6 +386,17 @@ static int ad7949_fuse_thread_fn(void *data)
 			} else {
 				consec[i] = 0;
 			}
+		}
+
+		/* Apply all GPIO changes at once after processing all channels */
+		if (tripped && gpios) {
+			DECLARE_BITMAP(values, 8);
+			values[0] = ad7949_adc->port_power_mask;
+			gpiod_set_array_value_cansleep(gpios->ndescs,
+						       gpios->desc,
+						       gpios->info,
+						       values);
+			tripped = false;
 		}
 
 		usleep_range(sleep_us, sleep_us + sleep_us / 10);
