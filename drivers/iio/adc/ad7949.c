@@ -345,7 +345,8 @@ static struct ad7949_adc_chip *fuse_devs[AD7949_FUSE_MAX_DEVS];
 static int fuse_dev_count;
 static int fuse_dev_expected = 2;  /* DTS has 2 ADCs with trip-gpios */
 static struct task_struct *fuse_shared_thread;
-static int fuse_debug_gpio = -1;
+static int fuse_debug_gpio = -1;   /* GPIO 49 (561): fuse fault pulses */
+static int fuse_loop_gpio = -1;    /* GPIO 42 (554): loop rate pulse */
 static DEFINE_MUTEX(fuse_registry_lock);
 
 /*
@@ -426,10 +427,10 @@ static int ad7949_fuse_thread_fn(void *data)
 
 		t_start = ktime_get();
 
-		/* Pulse at loop start for scope rate measurement */
-		if (fuse_debug_gpio >= 0) {
-			gpio_set_value(fuse_debug_gpio, 1);
-			gpio_set_value(fuse_debug_gpio, 0);
+		/* Pulse at loop start for scope rate measurement (GPIO 42) */
+		if (fuse_loop_gpio >= 0) {
+			gpio_set_value(fuse_loop_gpio, 1);
+			gpio_set_value(fuse_loop_gpio, 0);
 		}
 
 		/* Scan all ADCs sequentially — no bus contention */
@@ -946,8 +947,9 @@ static int ad7949_spi_probe(struct spi_device *spi)
 
 		/* Start shared fuse thread once all expected devices have probed */
 		if (fuse_dev_count >= fuse_dev_expected && !fuse_shared_thread) {
-			/* Debug GPIO for scope timing measurement.
-			 * SoC GPIO 49 = Linux GPIO base (512) + 49 = 561.
+			/* Debug GPIOs for scope timing measurement.
+			 * GPIO 49 (561): fuse fault detection pulses
+			 * GPIO 42 (554): loop rate pulse
 			 */
 			if (!gpio_request(561, "ad7949-fuse-debug") &&
 			    !gpio_direction_output(561, 0)) {
@@ -955,6 +957,13 @@ static int ad7949_spi_probe(struct spi_device *spi)
 				dev_info(dev, "fuse debug GPIO 561 (SoC pin 49) active\n");
 			} else {
 				dev_warn(dev, "could not request debug GPIO 561\n");
+			}
+			if (!gpio_request(554, "ad7949-loop-debug") &&
+			    !gpio_direction_output(554, 0)) {
+				fuse_loop_gpio = 554;
+				dev_info(dev, "loop debug GPIO 554 (SoC pin 42) active\n");
+			} else {
+				dev_warn(dev, "could not request debug GPIO 554\n");
 			}
 
 			fuse_shared_thread = kthread_run(
@@ -1010,6 +1019,10 @@ static void ad7949_spi_remove(struct spi_device *spi)
 		if (fuse_debug_gpio >= 0) {
 			gpio_free(fuse_debug_gpio);
 			fuse_debug_gpio = -1;
+		}
+		if (fuse_loop_gpio >= 0) {
+			gpio_free(fuse_loop_gpio);
+			fuse_loop_gpio = -1;
 		}
 	}
 
