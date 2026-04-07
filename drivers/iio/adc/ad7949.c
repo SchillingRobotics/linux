@@ -223,20 +223,22 @@ static int ad7949_spi_read_channel(struct ad7949_adc_chip *ad7949_adc, int *val,
 }
 
 /*
- * Scan all channels using a batched spi_message with cs_change between
+ * Scan selected channels using a batched spi_message with cs_change between
  * transfers. Each transfer sends the config for the next channel and reads
  * the result of the previous conversion (AD7689 pipeline). This minimises
  * SPI framework overhead: one mutex lock, one message, N+2 transfers.
  *
- * results[] must have room for ad7949_adc->num_channels entries.
+ * active_mask: bitmask of channels to scan (e.g. 0x0F for ch0-3).
+ *              Use 0xFF to scan all 8 channels.
+ * results[] is indexed by channel number; only active channels are written.
  * Caller must hold ad7949_adc->lock.
  */
-static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
-				    u16 *results)
+static int ad7949_scan_channels(struct ad7949_adc_chip *ad7949_adc,
+				u16 *results, u8 active_mask)
 {
-	int nch = ad7949_adc->num_channels;
-	/* N+2 transfers: 2 primes + N reads (AD7689 pipeline is 2 deep) */
-	int nxfers = nch + 2;
+	int active_ch[8];
+	int nactive = 0;
+	int nxfers;
 	struct spi_transfer *xfers = ad7949_adc->scan_xfers;
 	u16 *tx_bufs = ad7949_adc->scan_tx;
 	u16 *rx_bufs = ad7949_adc->scan_rx;
@@ -245,6 +247,17 @@ static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
 	u16 base_cfg;
 	int i, ret;
 
+	/* Build list of channels to scan */
+	for (i = 0; i < ad7949_adc->num_channels && i < 8; i++) {
+		if (active_mask & BIT(i))
+			active_ch[nactive++] = i;
+	}
+
+	if (nactive == 0)
+		return 0;
+
+	/* N+2 transfers: 2 primes + N reads (AD7689 pipeline is 2 deep) */
+	nxfers = nactive + 2;
 	if (nxfers > AD7949_MAX_XFERS)
 		return -EINVAL;
 
@@ -263,20 +276,13 @@ static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
 		/*
 		 * AD7689 pipeline is 2 deep: the result read during xfer K
 		 * is from the CFG written during xfer K-2.  We need N+2
-		 * transfers total: N transfers that advance through channels
-		 * 0..N-1 plus 2 trailing repeats to flush the pipeline.
-		 *
-		 *   xfer[0]   → CFG ch0,     rx garbage
-		 *   xfer[1]   → CFG ch1,     rx garbage
-		 *   xfer[2]   → CFG ch2,     rx ch0
-		 *   xfer[k]   → CFG ch(k),   rx ch(k-2)    for k < N
-		 *   xfer[N]   → CFG ch(N-1), rx ch(N-2)
-		 *   xfer[N+1] → CFG ch(N-1), rx ch(N-1)
+		 * transfers total: N transfers that advance through active
+		 * channels plus 2 trailing repeats to flush the pipeline.
 		 */
-		if (i < nch)
-			target_ch = i;
+		if (i < nactive)
+			target_ch = active_ch[i];
 		else
-			target_ch = nch - 1;
+			target_ch = active_ch[nactive - 1];
 
 		tx_bufs[i] = (base_cfg & ~AD7949_CFG_MASK_INX) |
 			     FIELD_PREP(AD7949_CFG_MASK_INX, target_ch);
@@ -310,9 +316,10 @@ static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
 		return ret;
 
 	/*
-	 * Pipeline: xfers[0..1] are prime (discard), xfers[2..N+1] have ch0..ch(N-1)
+	 * Pipeline: xfers[0..1] are prime (discard),
+	 * xfers[2..nactive+1] have active_ch[0..nactive-1]
 	 */
-	for (i = 0; i < nch; i++) {
+	for (i = 0; i < nactive; i++) {
 		u16 raw = rx_bufs[i + 2];
 
 		switch (ad7949_adc->spi->bits_per_word) {
@@ -327,11 +334,11 @@ static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
 			raw >>= shift;
 			break;
 		}
-		results[i] = raw;
+		results[active_ch[i]] = raw;
 	}
 
 	/* Update current_channel so single-channel reads stay efficient */
-	ad7949_adc->current_channel = nch - 1;
+	ad7949_adc->current_channel = active_ch[nactive - 1];
 
 	return ret;
 }
@@ -353,13 +360,15 @@ static DEFINE_MUTEX(fuse_registry_lock);
  * Process fuse logic for one ADC chip after a successful scan.
  */
 static void ad7949_fuse_check(struct ad7949_adc_chip *adc, u16 *results,
-			      u8 *consec, int dev_idx)
+			      u8 *consec, int dev_idx, u8 active_mask)
 {
-	int nch = adc->num_channels;
 	struct gpio_descs *gpios = adc->fuse_gpios;
 	int i;
 
-	for (i = 0; i < nch && i < 8; i++) {
+	for (i = 0; i < adc->num_channels && i < 8; i++) {
+		if (!(active_mask & BIT(i)))
+			continue;
+
 		adc->fuse_last_raw[i] = results[i];
 
 		if (adc->fuse_fault_mask & BIT(i))
@@ -436,18 +445,24 @@ static int ad7949_fuse_thread_fn(void *data)
 		/* Scan all ADCs sequentially — no bus contention */
 		for (d = 0; d < fuse_dev_count; d++) {
 			struct ad7949_adc_chip *adc = fuse_devs[d];
+			u8 active;
 
 			if (!adc || !adc->fuse_enable)
 				continue;
 
+			/* Skip ADC entirely if no ports are powered */
+			active = adc->port_power_mask;
+			if (!active)
+				continue;
+
 			mutex_lock(&adc->lock);
-			ret = ad7949_scan_all_channels(adc, results[d]);
+			ret = ad7949_scan_channels(adc, results[d], active);
 			mutex_unlock(&adc->lock);
 
 			if (ret)
 				continue;
 
-			ad7949_fuse_check(adc, results[d], consec[d], d);
+			ad7949_fuse_check(adc, results[d], consec[d], d, active);
 		}
 
 		t_elapsed = ktime_sub(ktime_get(), t_start);
