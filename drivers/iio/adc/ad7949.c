@@ -94,7 +94,6 @@ static const struct ad7949_adc_spec ad7949_adc_spec[] = {
  * @fuse_consec_count: consecutive over-threshold readings required to trip
  * @fuse_enable: whether the fuse polling thread is active
  * @fuse_fault_mask: bitmask of tripped channels
- * @fuse_thread: kthread for polling
  * @fuse_last_raw: last raw ADC reading per channel (for sysfs)
  */
 struct ad7949_adc_chip {
@@ -118,8 +117,6 @@ struct ad7949_adc_chip {
 	bool fuse_enable;
 	u32 fuse_fault_mask;
 	u32 port_power_mask;  /* bitmask: 1=ON, 0=OFF. Written by userspace + fuse */
-	struct task_struct *fuse_thread;
-	int fuse_debug_gpio;  /* SoC GPIO toggled on trip for scope timing */
 	u16 fuse_last_raw[8];
 
 	/* Pre-allocated scan buffers (max 8 channels + 2 pipeline flushes) */
@@ -340,87 +337,116 @@ static int ad7949_scan_all_channels(struct ad7949_adc_chip *ad7949_adc,
 }
 
 /*
- * Software fuse kthread: polls all channels, trips GPIOs on overcurrent.
+ * Global registry of fuse-capable ADC instances.  A single kthread scans
+ * all registered devices sequentially, eliminating SPI bus contention.
+ */
+#define AD7949_FUSE_MAX_DEVS	4
+static struct ad7949_adc_chip *fuse_devs[AD7949_FUSE_MAX_DEVS];
+static int fuse_dev_count;
+static int fuse_dev_expected = 2;  /* DTS has 2 ADCs with trip-gpios */
+static struct task_struct *fuse_shared_thread;
+static int fuse_debug_gpio = -1;
+static DEFINE_MUTEX(fuse_registry_lock);
+
+/*
+ * Process fuse logic for one ADC chip after a successful scan.
+ */
+static void ad7949_fuse_check(struct ad7949_adc_chip *adc, u16 *results,
+			      u8 *consec, int dev_idx)
+{
+	int nch = adc->num_channels;
+	struct gpio_descs *gpios = adc->fuse_gpios;
+	int i;
+
+	for (i = 0; i < nch && i < 8; i++) {
+		adc->fuse_last_raw[i] = results[i];
+
+		if (adc->fuse_fault_mask & BIT(i))
+			continue;
+
+		if (results[i] > adc->fuse_threshold) {
+			consec[i]++;
+			/* Pulse 1: first over-threshold detection */
+			if (consec[i] == 1 && fuse_debug_gpio >= 0) {
+				gpio_set_value(fuse_debug_gpio, 1);
+				gpio_set_value(fuse_debug_gpio, 0);
+			}
+			if (consec[i] >= adc->fuse_consec_count) {
+				if (gpios && i < gpios->ndescs) {
+					adc->fuse_fault_mask |= BIT(i);
+					adc->port_power_mask &= ~BIT(i);
+					/* Pulse 2: right before port power off */
+					if (fuse_debug_gpio >= 0) {
+						gpio_set_value(fuse_debug_gpio, 1);
+						gpio_set_value(fuse_debug_gpio, 0);
+					}
+					gpiod_set_value_cansleep(gpios->desc[i], 0);
+					/* Pulse 3: right after port power off */
+					if (fuse_debug_gpio >= 0) {
+						gpio_set_value(fuse_debug_gpio, 1);
+						gpio_set_value(fuse_debug_gpio, 0);
+					}
+					dev_warn(&adc->spi->dev,
+						 "fuse trip dev%d ch%d raw=%u thresh=%u\n",
+						 dev_idx, i, results[i],
+						 adc->fuse_threshold);
+				}
+				consec[i] = 0;
+			}
+		} else {
+			consec[i] = 0;
+		}
+	}
+}
+
+/*
+ * Shared software fuse kthread: sequentially scans all registered ADCs.
  */
 static int ad7949_fuse_thread_fn(void *data)
 {
-	struct ad7949_adc_chip *ad7949_adc = data;
-	u16 results[8];
-	u8 consec[8] = {};
-	int nch = ad7949_adc->num_channels;
-	struct gpio_descs *gpios = ad7949_adc->fuse_gpios;
-	int i, ret;
+	u16 results[AD7949_FUSE_MAX_DEVS][8];
+	u8 consec[AD7949_FUSE_MAX_DEVS][8] = {};
+	int d, ret;
 
-	dev_info(&ad7949_adc->spi->dev,
-		 "fuse thread started: threshold=%u poll_hz=%u consec=%u\n",
-		 ad7949_adc->fuse_threshold,
-		 ad7949_adc->fuse_poll_hz,
-		 ad7949_adc->fuse_consec_count);
+	pr_info("ad7949-fuse: shared thread started, %d devices\n",
+		fuse_dev_count);
 
 	while (!kthread_should_stop()) {
 		ktime_t t_start, t_elapsed;
 		unsigned long target_us, remaining_us;
+		struct ad7949_adc_chip *adc0 = fuse_devs[0];
 
-		if (!ad7949_adc->fuse_enable) {
+		if (!adc0 || !adc0->fuse_enable) {
 			msleep(100);
 			continue;
 		}
 
-		target_us = ad7949_adc->fuse_poll_hz ?
-			    1000000UL / ad7949_adc->fuse_poll_hz : 100000;
+		target_us = adc0->fuse_poll_hz ?
+			    1000000UL / adc0->fuse_poll_hz : 100000;
 
 		t_start = ktime_get();
 
-		mutex_lock(&ad7949_adc->lock);
-		ret = ad7949_scan_all_channels(ad7949_adc, results);
-		mutex_unlock(&ad7949_adc->lock);
-
-		if (ret) {
-			usleep_range(target_us, target_us + target_us / 10);
-			continue;
+		/* Pulse at loop start for scope rate measurement */
+		if (fuse_debug_gpio >= 0) {
+			gpio_set_value(fuse_debug_gpio, 1);
+			gpio_set_value(fuse_debug_gpio, 0);
 		}
 
-		for (i = 0; i < nch && i < 8; i++) {
-			ad7949_adc->fuse_last_raw[i] = results[i];
+		/* Scan all ADCs sequentially — no bus contention */
+		for (d = 0; d < fuse_dev_count; d++) {
+			struct ad7949_adc_chip *adc = fuse_devs[d];
 
-			/* Skip already-tripped channels */
-			if (ad7949_adc->fuse_fault_mask & BIT(i))
+			if (!adc || !adc->fuse_enable)
 				continue;
 
-			if (results[i] > ad7949_adc->fuse_threshold) {
-				consec[i]++;
-				/* Pulse 1: first over-threshold detection */
-				if (consec[i] == 1 &&
-				    ad7949_adc->fuse_debug_gpio >= 0) {
-					gpio_set_value(ad7949_adc->fuse_debug_gpio, 1);
-					gpio_set_value(ad7949_adc->fuse_debug_gpio, 0);
-				}
-				if (consec[i] >= ad7949_adc->fuse_consec_count) {
-					/* Trip: turn off port power */
-					if (gpios && i < gpios->ndescs) {
-						ad7949_adc->fuse_fault_mask |= BIT(i);
-						ad7949_adc->port_power_mask &= ~BIT(i);
-						/* Pulse 2: right before port power off */
-						if (ad7949_adc->fuse_debug_gpio >= 0) {
-							gpio_set_value(ad7949_adc->fuse_debug_gpio, 1);
-							gpio_set_value(ad7949_adc->fuse_debug_gpio, 0);
-						}
-						gpiod_set_value_cansleep(gpios->desc[i], 0);
-						/* Pulse 3: right after port power off */
-						if (ad7949_adc->fuse_debug_gpio >= 0) {
-							gpio_set_value(ad7949_adc->fuse_debug_gpio, 1);
-							gpio_set_value(ad7949_adc->fuse_debug_gpio, 0);
-						}
-						dev_warn(&ad7949_adc->spi->dev,
-							 "fuse trip ch%d raw=%u thresh=%u\n",
-							 i, results[i],
-							 ad7949_adc->fuse_threshold);
-					}
-					consec[i] = 0;
-				}
-			} else {
-				consec[i] = 0;
-			}
+			mutex_lock(&adc->lock);
+			ret = ad7949_scan_all_channels(adc, results[d]);
+			mutex_unlock(&adc->lock);
+
+			if (ret)
+				continue;
+
+			ad7949_fuse_check(adc, results[d], consec[d], d);
 		}
 
 		t_elapsed = ktime_sub(ktime_get(), t_start);
@@ -913,31 +939,40 @@ static int ad7949_spi_probe(struct spi_device *spi)
 		ad7949_adc->fuse_fault_mask = 0;
 		ad7949_adc->port_power_mask = 0;
 
-		/* Debug GPIO for scope timing measurement.
-		 * SoC GPIO 49 = Linux GPIO base (512) + 49 = 561.
-		 */
-		ad7949_adc->fuse_debug_gpio = -1;
-		if (!gpio_request(561, "ad7949-fuse-debug") &&
-		    !gpio_direction_output(561, 0)) {
-			ad7949_adc->fuse_debug_gpio = 561;
-			dev_info(dev, "fuse debug GPIO 561 (SoC pin 49) active\n");
-		} else {
-			dev_warn(dev, "could not request debug GPIO 561\n");
+		/* Register in global fuse device list */
+		mutex_lock(&fuse_registry_lock);
+		if (fuse_dev_count < AD7949_FUSE_MAX_DEVS)
+			fuse_devs[fuse_dev_count++] = ad7949_adc;
+
+		/* Start shared fuse thread once all expected devices have probed */
+		if (fuse_dev_count >= fuse_dev_expected && !fuse_shared_thread) {
+			/* Debug GPIO for scope timing measurement.
+			 * SoC GPIO 49 = Linux GPIO base (512) + 49 = 561.
+			 */
+			if (!gpio_request(561, "ad7949-fuse-debug") &&
+			    !gpio_direction_output(561, 0)) {
+				fuse_debug_gpio = 561;
+				dev_info(dev, "fuse debug GPIO 561 (SoC pin 49) active\n");
+			} else {
+				dev_warn(dev, "could not request debug GPIO 561\n");
+			}
+
+			fuse_shared_thread = kthread_run(
+				ad7949_fuse_thread_fn, NULL,
+				"ad7949-fuse");
+			if (IS_ERR(fuse_shared_thread)) {
+				ret = PTR_ERR(fuse_shared_thread);
+				fuse_shared_thread = NULL;
+				mutex_unlock(&fuse_registry_lock);
+				dev_err(dev, "failed to start fuse thread: %d\n", ret);
+				return ret;
+			}
+			sched_set_fifo(fuse_shared_thread);
 		}
+		mutex_unlock(&fuse_registry_lock);
 
-		ad7949_adc->fuse_thread = kthread_run(
-			ad7949_fuse_thread_fn, ad7949_adc,
-			"ad7949-fuse-%s", dev_name(dev));
-		if (IS_ERR(ad7949_adc->fuse_thread)) {
-			ret = PTR_ERR(ad7949_adc->fuse_thread);
-			ad7949_adc->fuse_thread = NULL;
-			dev_err(dev, "failed to start fuse thread: %d\n", ret);
-			return ret;
-		}
-
-		sched_set_fifo(ad7949_adc->fuse_thread);
-
-		dev_info(dev, "software fuse: %d gpios, threshold=%u, poll=%uHz, consec=%u\n",
+		dev_info(dev, "software fuse [%d/%d]: %d gpios, threshold=%u, poll=%uHz, consec=%u\n",
+			 fuse_dev_count, fuse_dev_expected,
 			 ad7949_adc->fuse_gpios->ndescs,
 			 ad7949_adc->fuse_threshold,
 			 ad7949_adc->fuse_poll_hz,
@@ -955,11 +990,30 @@ static void ad7949_spi_remove(struct spi_device *spi)
 {
 	struct iio_dev *indio_dev = spi_get_drvdata(spi);
 	struct ad7949_adc_chip *ad7949_adc = iio_priv(indio_dev);
+	int i;
 
-	if (ad7949_adc->fuse_thread)
-		kthread_stop(ad7949_adc->fuse_thread);
-	if (ad7949_adc->fuse_debug_gpio >= 0)
-		gpio_free(ad7949_adc->fuse_debug_gpio);
+	mutex_lock(&fuse_registry_lock);
+
+	/* Remove this device from the registry */
+	for (i = 0; i < fuse_dev_count; i++) {
+		if (fuse_devs[i] == ad7949_adc) {
+			fuse_devs[i] = fuse_devs[--fuse_dev_count];
+			fuse_devs[fuse_dev_count] = NULL;
+			break;
+		}
+	}
+
+	/* Stop shared thread when last fuse device is removed */
+	if (fuse_dev_count == 0 && fuse_shared_thread) {
+		kthread_stop(fuse_shared_thread);
+		fuse_shared_thread = NULL;
+		if (fuse_debug_gpio >= 0) {
+			gpio_free(fuse_debug_gpio);
+			fuse_debug_gpio = -1;
+		}
+	}
+
+	mutex_unlock(&fuse_registry_lock);
 }
 
 static const struct of_device_id ad7949_spi_of_id[] = {
