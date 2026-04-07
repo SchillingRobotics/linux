@@ -16,6 +16,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/gpio.h>
 #include <linux/iio/iio.h>
+#include <linux/ktime.h>
 #include <linux/kthread.h>
 #include <linux/module.h>
 #include <linux/sched/rt.h>
@@ -348,7 +349,6 @@ static int ad7949_fuse_thread_fn(void *data)
 	u8 consec[8] = {};
 	int nch = ad7949_adc->num_channels;
 	struct gpio_descs *gpios = ad7949_adc->fuse_gpios;
-	unsigned long sleep_us;
 	int i, ret;
 
 	dev_info(&ad7949_adc->spi->dev,
@@ -358,20 +358,25 @@ static int ad7949_fuse_thread_fn(void *data)
 		 ad7949_adc->fuse_consec_count);
 
 	while (!kthread_should_stop()) {
+		ktime_t t_start, t_elapsed;
+		unsigned long target_us, remaining_us;
+
 		if (!ad7949_adc->fuse_enable) {
 			msleep(100);
 			continue;
 		}
 
-		sleep_us = ad7949_adc->fuse_poll_hz ?
-			   1000000UL / ad7949_adc->fuse_poll_hz : 100000;
+		target_us = ad7949_adc->fuse_poll_hz ?
+			    1000000UL / ad7949_adc->fuse_poll_hz : 100000;
+
+		t_start = ktime_get();
 
 		mutex_lock(&ad7949_adc->lock);
 		ret = ad7949_scan_all_channels(ad7949_adc, results);
 		mutex_unlock(&ad7949_adc->lock);
 
 		if (ret) {
-			usleep_range(sleep_us, sleep_us + sleep_us / 10);
+			usleep_range(target_us, target_us + target_us / 10);
 			continue;
 		}
 
@@ -418,7 +423,11 @@ static int ad7949_fuse_thread_fn(void *data)
 			}
 		}
 
-		usleep_range(sleep_us, sleep_us + sleep_us / 10);
+		t_elapsed = ktime_sub(ktime_get(), t_start);
+		remaining_us = ktime_to_us(t_elapsed) < target_us ?
+			       target_us - ktime_to_us(t_elapsed) : 0;
+		if (remaining_us > 0)
+			usleep_range(remaining_us, remaining_us + remaining_us / 10);
 	}
 
 	return 0;
