@@ -904,14 +904,16 @@ static int ad7949_spi_probe(struct spi_device *spi)
 		ad7949_adc->fuse_fault_mask = 0;
 		ad7949_adc->port_power_mask = 0;
 
-		/* Debug GPIO for scope timing measurement */
+		/* Debug GPIO for scope timing measurement.
+		 * SoC GPIO 49 = Linux GPIO base (512) + 49 = 561.
+		 */
 		ad7949_adc->fuse_debug_gpio = -1;
-		if (!gpio_request(49, "ad7949-fuse-debug") &&
-		    !gpio_direction_output(49, 0)) {
-			ad7949_adc->fuse_debug_gpio = 49;
-			dev_info(dev, "fuse debug GPIO 49 active\n");
+		if (!gpio_request(561, "ad7949-fuse-debug") &&
+		    !gpio_direction_output(561, 0)) {
+			ad7949_adc->fuse_debug_gpio = 561;
+			dev_info(dev, "fuse debug GPIO 561 (SoC pin 49) active\n");
 		} else {
-			dev_warn(dev, "could not request debug GPIO 49\n");
+			dev_warn(dev, "could not request debug GPIO 561\n");
 		}
 
 		ad7949_adc->fuse_thread = kthread_run(
