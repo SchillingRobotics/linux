@@ -14,6 +14,7 @@
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
+#include <linux/gpio.h>
 #include <linux/iio/iio.h>
 #include <linux/kthread.h>
 #include <linux/module.h>
@@ -117,6 +118,7 @@ struct ad7949_adc_chip {
 	u32 fuse_fault_mask;
 	u32 port_power_mask;  /* bitmask: 1=ON, 0=OFF. Written by userspace + fuse */
 	struct task_struct *fuse_thread;
+	int fuse_debug_gpio;  /* SoC GPIO toggled on trip for scope timing */
 	u16 fuse_last_raw[8];
 
 	/* Pre-allocated scan buffers (max 8 channels + 2 pipeline flushes) */
@@ -382,12 +384,28 @@ static int ad7949_fuse_thread_fn(void *data)
 
 			if (results[i] > ad7949_adc->fuse_threshold) {
 				consec[i]++;
+				/* Pulse 1: first over-threshold detection */
+				if (consec[i] == 1 &&
+				    ad7949_adc->fuse_debug_gpio >= 0) {
+					gpio_set_value(ad7949_adc->fuse_debug_gpio, 1);
+					gpio_set_value(ad7949_adc->fuse_debug_gpio, 0);
+				}
 				if (consec[i] >= ad7949_adc->fuse_consec_count) {
 					/* Trip: turn off port power */
 					if (gpios && i < gpios->ndescs) {
 						ad7949_adc->fuse_fault_mask |= BIT(i);
 						ad7949_adc->port_power_mask &= ~BIT(i);
+						/* Pulse 2: right before port power off */
+						if (ad7949_adc->fuse_debug_gpio >= 0) {
+							gpio_set_value(ad7949_adc->fuse_debug_gpio, 1);
+							gpio_set_value(ad7949_adc->fuse_debug_gpio, 0);
+						}
 						gpiod_set_value_cansleep(gpios->desc[i], 0);
+						/* Pulse 3: right after port power off */
+						if (ad7949_adc->fuse_debug_gpio >= 0) {
+							gpio_set_value(ad7949_adc->fuse_debug_gpio, 1);
+							gpio_set_value(ad7949_adc->fuse_debug_gpio, 0);
+						}
 						dev_warn(&ad7949_adc->spi->dev,
 							 "fuse trip ch%d raw=%u thresh=%u\n",
 							 i, results[i],
@@ -886,6 +904,16 @@ static int ad7949_spi_probe(struct spi_device *spi)
 		ad7949_adc->fuse_fault_mask = 0;
 		ad7949_adc->port_power_mask = 0;
 
+		/* Debug GPIO for scope timing measurement */
+		ad7949_adc->fuse_debug_gpio = -1;
+		if (!gpio_request(49, "ad7949-fuse-debug") &&
+		    !gpio_direction_output(49, 0)) {
+			ad7949_adc->fuse_debug_gpio = 49;
+			dev_info(dev, "fuse debug GPIO 49 active\n");
+		} else {
+			dev_warn(dev, "could not request debug GPIO 49\n");
+		}
+
 		ad7949_adc->fuse_thread = kthread_run(
 			ad7949_fuse_thread_fn, ad7949_adc,
 			"ad7949-fuse-%s", dev_name(dev));
@@ -919,6 +947,8 @@ static void ad7949_spi_remove(struct spi_device *spi)
 
 	if (ad7949_adc->fuse_thread)
 		kthread_stop(ad7949_adc->fuse_thread);
+	if (ad7949_adc->fuse_debug_gpio >= 0)
+		gpio_free(ad7949_adc->fuse_debug_gpio);
 }
 
 static const struct of_device_id ad7949_spi_of_id[] = {
