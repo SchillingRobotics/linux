@@ -240,7 +240,6 @@
 		     <GIC_SPI  9 IRQ_TYPE_LEVEL_HIGH>,
 		     <GIC_SPI 74 IRQ_TYPE_LEVEL_HIGH>,
 		     <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>,
-		     <GIC_SPI 15 IRQ_TYPE_LEVEL_HIGH>,
 		     <GIC_SPI 111 IRQ_TYPE_LEVEL_HIGH>,
 		     <GIC_SPI 112 IRQ_TYPE_LEVEL_HIGH>,
 		     <GIC_SPI 113 IRQ_TYPE_LEVEL_HIGH>,
@@ -252,7 +251,7 @@
 		     <GIC_SPI 119 IRQ_TYPE_LEVEL_HIGH>,
 		     <GIC_SPI 120 IRQ_TYPE_LEVEL_HIGH>;
 	interrupt-names = "master", "ptp_sync", "ptp_rdy", "oam_vop",
-			  "sgpio", "gpio", "sd10g_kr0", "sd10g_kr1",
+			  "sgpio", "sd10g_kr0", "sd10g_kr1",
 			  "sd10g_kr2", "sd10g_kr3", "sd10g_kr4",
 			  "sd10g_kr5", "sd10g_kr6", "sd10g_kr7",
 			  "sd10g_kr8", "sd10g_kr9";
