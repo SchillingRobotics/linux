@@ -81,6 +81,36 @@
 		compatible = "microchip,lan969x-ifmux";
 		status = "okay";
 	};
+
+	/* Hardware fast fuse: external comparators + priority encoder */
+	fast_fuse: fast-fuse {
+		compatible = "schilling,fast-fuse";
+		interrupt-parent = <&gpio>;
+		interrupts = <2 IRQ_TYPE_LEVEL_LOW>;
+		addr-gpios = <&gpio 1 GPIO_ACTIVE_HIGH>,   /* bit 4 (MSB) */
+			     <&gpio 0 GPIO_ACTIVE_HIGH>,   /* bit 3 */
+			     <&gpio 13 GPIO_ACTIVE_HIGH>,  /* bit 2 */
+			     <&gpio 12 GPIO_ACTIVE_HIGH>;  /* bit 1 (LSB) */
+		port-power-gpios = <&port_power 0 GPIO_ACTIVE_HIGH>,
+				   <&port_power 1 GPIO_ACTIVE_HIGH>,
+				   <&port_power 2 GPIO_ACTIVE_HIGH>,
+				   <&port_power 3 GPIO_ACTIVE_HIGH>,
+				   <&port_power 4 GPIO_ACTIVE_HIGH>,
+				   <&port_power 5 GPIO_ACTIVE_HIGH>,
+				   <&port_power 6 GPIO_ACTIVE_HIGH>,
+				   <&port_power 7 GPIO_ACTIVE_HIGH>,
+				   <&port_power 8 GPIO_ACTIVE_HIGH>,
+				   <&port_power 9 GPIO_ACTIVE_HIGH>,
+				   <&port_power 10 GPIO_ACTIVE_HIGH>,
+				   <&port_power 11 GPIO_ACTIVE_HIGH>,
+				   <&port_power 12 GPIO_ACTIVE_HIGH>,
+				   <&port_power 13 GPIO_ACTIVE_HIGH>,
+				   <&port_power 14 GPIO_ACTIVE_HIGH>,
+				   <&port_power 15 GPIO_ACTIVE_HIGH>;
+		settle-time-ms = <1>;
+		holdoff-time-us = <300>;
+		status = "okay";
+	};
 };
 
 &flx0 {
@@ -175,10 +205,6 @@
 };
 
 &gpio {
-	/delete-property/ interrupts;
-	/delete-property/ interrupt-controller;
-	/delete-property/ #interrupt-cells;
-
 	/* Hold 74HC595 nSHIFT_RESET (MR) pin high (deasserted)
 	 *
 	 * This logic seems backwards, but setting output-low on

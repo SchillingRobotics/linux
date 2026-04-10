@@ -619,6 +619,18 @@ config MCHP_TFA_CTL
 	  This will enable an interface for functions supplied by the
 	  Microchip LAN966X SoC secure firmware.
 
+config FAST_FUSE
+	tristate "Hardware fast fuse overcurrent protection"
+	depends on OF && GPIOLIB
+	help
+	  Driver for hardware-based overcurrent protection using external
+	  comparators and a priority encoder. When an overcurrent condition
+	  is detected, the driver immediately cuts port power via 74HC595
+	  shift register GPIOs.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called fast-fuse.
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
