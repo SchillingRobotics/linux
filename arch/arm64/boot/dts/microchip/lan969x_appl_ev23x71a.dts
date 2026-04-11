@@ -82,15 +82,26 @@
 		status = "okay";
 	};
 
-	/* Hardware fast fuse: external comparators + priority encoder */
+	/* Hardware fast fuse: external comparators + priority encoder
+	 *
+	 * Two 74HC148 encoders cascaded via EO → EI, muxed through a 74HC257.
+	 * 74HC148 outputs are active-low; addr-gpios use GPIO_ACTIVE_LOW
+	 * so gpiod_get_value() returns the true (non-inverted) address.
+	 *
+	 * GPIO 12 = IRQ
+	 * GPIO  2 = addr bit 3
+	 * GPIO  1 = addr bit 2
+	 * GPIO  0 = addr bit 1
+	 * GPIO 13 = addr bit 0
+	 */
 	fast_fuse: fast-fuse {
 		compatible = "schilling,fast-fuse";
 		interrupt-parent = <&gpio>;
-		interrupts = <2 IRQ_TYPE_LEVEL_LOW>;
-		addr-gpios = <&gpio 1 GPIO_ACTIVE_HIGH>,   /* bit 4 (MSB) */
-			     <&gpio 0 GPIO_ACTIVE_HIGH>,   /* bit 3 */
-			     <&gpio 13 GPIO_ACTIVE_HIGH>,  /* bit 2 */
-			     <&gpio 12 GPIO_ACTIVE_HIGH>;  /* bit 1 (LSB) */
+		interrupts = <12 IRQ_TYPE_LEVEL_LOW>;
+		addr-gpios = <&gpio 2 GPIO_ACTIVE_LOW>,    /* bit 3 (MSB) */
+			     <&gpio 1 GPIO_ACTIVE_LOW>,    /* bit 2 */
+			     <&gpio 0 GPIO_ACTIVE_LOW>,    /* bit 1 */
+			     <&gpio 13 GPIO_ACTIVE_LOW>;   /* bit 0 (LSB) */
 		port-power-gpios = <&port_power 0 GPIO_ACTIVE_HIGH>,
 				   <&port_power 1 GPIO_ACTIVE_HIGH>,
 				   <&port_power 2 GPIO_ACTIVE_HIGH>,
