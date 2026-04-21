@@ -99,10 +99,9 @@ static int internal_dev_xmit(struct sk_buff *skb, struct net_device *netdev) {
         goto DO_CNT;
     }
 
-    if (skb_headroom(skb) < ifh_encap_len) {
+    if (skb_cow_head(skb, ifh_encap_len)) {
         tx_ok = 0;
-        pr_info("Not enough room for VTSS-header: %u\n",
-               skb_headroom(skb));
+        pr_info("Failed to ensure headroom for VTSS-header\n");
         goto DO_CNT;
     }
 
