@@ -92,6 +92,28 @@
 		status = "okay";
 	};
 
+	/* Port power control via 74HC595 GPIO expander */
+	port_power_ctrl: port-power {
+		compatible = "schilling,port-power";
+		port-power-gpios = <&port_power 0 GPIO_ACTIVE_HIGH>,
+				   <&port_power 1 GPIO_ACTIVE_HIGH>,
+				   <&port_power 2 GPIO_ACTIVE_HIGH>,
+				   <&port_power 3 GPIO_ACTIVE_HIGH>,
+				   <&port_power 4 GPIO_ACTIVE_HIGH>,
+				   <&port_power 5 GPIO_ACTIVE_HIGH>,
+				   <&port_power 6 GPIO_ACTIVE_HIGH>,
+				   <&port_power 7 GPIO_ACTIVE_HIGH>,
+				   <&port_power 8 GPIO_ACTIVE_HIGH>,
+				   <&port_power 9 GPIO_ACTIVE_HIGH>,
+				   <&port_power 10 GPIO_ACTIVE_HIGH>,
+				   <&port_power 11 GPIO_ACTIVE_HIGH>,
+				   <&port_power 12 GPIO_ACTIVE_HIGH>,
+				   <&port_power 13 GPIO_ACTIVE_HIGH>,
+				   <&port_power 14 GPIO_ACTIVE_HIGH>,
+				   <&port_power 15 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+
 	/* Hardware fast fuse: external comparators + priority encoder
 	 *
 	 * Two 74HC148 encoders cascaded via EO → EI, muxed through a 74HC257.
@@ -112,22 +134,6 @@
 			     <&gpio 1 GPIO_ACTIVE_LOW>,    /* bit 2 */
 			     <&gpio 0 GPIO_ACTIVE_LOW>,    /* bit 1 */
 			     <&gpio 13 GPIO_ACTIVE_LOW>;   /* bit 0 (LSB) */
-		port-power-gpios = <&port_power 0 GPIO_ACTIVE_HIGH>,
-				   <&port_power 1 GPIO_ACTIVE_HIGH>,
-				   <&port_power 2 GPIO_ACTIVE_HIGH>,
-				   <&port_power 3 GPIO_ACTIVE_HIGH>,
-				   <&port_power 4 GPIO_ACTIVE_HIGH>,
-				   <&port_power 5 GPIO_ACTIVE_HIGH>,
-				   <&port_power 6 GPIO_ACTIVE_HIGH>,
-				   <&port_power 7 GPIO_ACTIVE_HIGH>,
-				   <&port_power 8 GPIO_ACTIVE_HIGH>,
-				   <&port_power 9 GPIO_ACTIVE_HIGH>,
-				   <&port_power 10 GPIO_ACTIVE_HIGH>,
-				   <&port_power 11 GPIO_ACTIVE_HIGH>,
-				   <&port_power 12 GPIO_ACTIVE_HIGH>,
-				   <&port_power 13 GPIO_ACTIVE_HIGH>,
-				   <&port_power 14 GPIO_ACTIVE_HIGH>,
-				   <&port_power 15 GPIO_ACTIVE_HIGH>;
 		settle-time-ms = <1>;
 		holdoff-time-us = <300>;
 		status = "okay";

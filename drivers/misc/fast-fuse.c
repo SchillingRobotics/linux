@@ -3,12 +3,11 @@
  * Fast fuse hardware overcurrent protection driver
  *
  * Uses external comparators + priority encoder to detect overcurrent
- * and cut port power via 74HC595 shift register GPIOs.
+ * and cut port power via the port-power driver.
  *
  * DTS node provides:
  *   - IRQ from priority encoder output (active-low, level-triggered)
  *   - 4 address GPIOs encoding the faulted port (MSB-first)
- *   - 16 port-power GPIOs (active-high, from 74HC595 expander)
  *   - settle-time-ms: encoder settle delay after cutting power
  *   - holdoff-time-us: IRQ holdoff when no valid port trips
  *
@@ -21,9 +20,11 @@
 #include <linux/gpio/consumer.h>
 #include <linux/of.h>
 #include <linux/delay.h>
+#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/sysfs.h>
-#include <linux/bitmap.h>
+#include <linux/irqdesc.h>
+#include <linux/port_power.h>
 
 #define FAST_FUSE_MAX_PORTS	16
 #define FAST_FUSE_ADDR_BITS	4
@@ -34,7 +35,6 @@ struct fast_fuse {
 
 	/* GPIO descriptors */
 	struct gpio_descs	*addr_gpios;	/* 4-bit address from encoder */
-	struct gpio_descs	*power_gpios;	/* 16 port power controls */
 
 	/* Configuration */
 	u32			settle_time_ms;
@@ -44,7 +44,6 @@ struct fast_fuse {
 	spinlock_t		lock;
 	u16			enable_mask;	/* ports enabled for fuse */
 	u16			fault_mask;	/* ports that have faulted */
-	u16			power_mask;	/* ports currently powered */
 
 	/* Port address read in hardirq, consumed by thread */
 	int			pending_port;
@@ -94,21 +93,22 @@ static irqreturn_t fast_fuse_thread(int irq, void *data)
 	spin_lock_irqsave(&ff->lock, flags);
 	if (ff->enable_mask & BIT(port)) {
 		/*
-		 * Always cut power when hardware signals overcurrent,
+		 * Always record fault when hardware signals overcurrent,
 		 * regardless of fault_mask state. Defense in depth:
 		 * don't let a stale fault bit prevent a real trip.
 		 */
 		ff->fault_mask |= BIT(port);
-		ff->power_mask &= ~BIT(port);
 		tripped = true;
 	}
 	spin_unlock_irqrestore(&ff->lock, flags);
 
 	if (tripped) {
-		/* Cut port power — goes through spi-gpio, may sleep */
-		gpiod_set_value_cansleep(ff->power_gpios->desc[port], 0);
+		/* Cut port power via port-power driver */
+		port_power_trip(port);
 		dev_warn(ff->dev, "fast fuse tripped on port %d\n", port + 1);
 
+		// TODO(Trevor): Verify that this is the actual behavior we want
+		//               The current implementation 
 		/* Wait for priority encoder to settle after removing load */
 		msleep(ff->settle_time_ms);
 
@@ -120,31 +120,6 @@ holdoff:
 	/* No valid/enabled port — brief holdoff to prevent IRQ storm */
 	usleep_range(ff->holdoff_time_us, ff->holdoff_time_us + 100);
 	return IRQ_HANDLED;
-}
-
-/* ---------- port power helpers ---------- */
-
-static void fast_fuse_apply_power(struct fast_fuse *ff, u16 mask)
-{
-	DECLARE_BITMAP(values, FAST_FUSE_MAX_PORTS);
-	int i;
-
-	values[0] = mask;
-
-	/*
-	 * Try bulk set first (single SPI transaction on 74HC595).
-	 * Fall back to per-pin if the gpiochip doesn't support set_multiple.
-	 */
-	if (ff->power_gpios->ndescs == FAST_FUSE_MAX_PORTS) {
-		gpiod_set_array_value_cansleep(ff->power_gpios->ndescs,
-					       ff->power_gpios->desc,
-					       ff->power_gpios->info,
-					       values);
-	} else {
-		for (i = 0; i < ff->power_gpios->ndescs; i++)
-			gpiod_set_value_cansleep(ff->power_gpios->desc[i],
-						 !!(mask & BIT(i)));
-	}
 }
 
 /* ---------- sysfs interface ---------- */
@@ -197,11 +172,10 @@ static ssize_t fault_mask_show(struct device *dev,
 
 	return sysfs_emit(buf, "0x%04x\n", mask);
 }
-static DEVICE_ATTR_RO(fault_mask);
 
-static ssize_t clear_faults_store(struct device *dev,
-				  struct device_attribute *attr,
-				  const char *buf, size_t count)
+static ssize_t fault_mask_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
 {
 	struct fast_fuse *ff = dev_get_drvdata(dev);
 	u16 mask;
@@ -218,58 +192,11 @@ static ssize_t clear_faults_store(struct device *dev,
 
 	return count;
 }
-static DEVICE_ATTR_WO(clear_faults);
-
-static ssize_t power_mask_show(struct device *dev,
-			       struct device_attribute *attr, char *buf)
-{
-	struct fast_fuse *ff = dev_get_drvdata(dev);
-	u16 mask;
-	unsigned long flags;
-
-	spin_lock_irqsave(&ff->lock, flags);
-	mask = ff->power_mask;
-	spin_unlock_irqrestore(&ff->lock, flags);
-
-	return sysfs_emit(buf, "0x%04x\n", mask);
-}
-
-static ssize_t power_mask_store(struct device *dev,
-				struct device_attribute *attr,
-				const char *buf, size_t count)
-{
-	struct fast_fuse *ff = dev_get_drvdata(dev);
-	u16 requested;
-	unsigned long flags;
-	int ret;
-
-	ret = kstrtou16(buf, 0, &requested);
-	if (ret)
-		return ret;
-
-	spin_lock_irqsave(&ff->lock, flags);
-	/*
-	 * Match legacy NODE firmware (014-0869) behavior: writing the
-	 * power mask implicitly clears fault bits for ports being
-	 * enabled. No separate "clear fault" step is required. If the
-	 * overcurrent condition persists, the hardware fast fuse will
-	 * re-trip within microseconds.
-	 */
-	ff->fault_mask &= ~requested;
-	ff->power_mask = requested;
-	spin_unlock_irqrestore(&ff->lock, flags);
-
-	fast_fuse_apply_power(ff, requested);
-
-	return count;
-}
-static DEVICE_ATTR_RW(power_mask);
+static DEVICE_ATTR_RW(fault_mask);
 
 static struct attribute *fast_fuse_attrs[] = {
 	&dev_attr_enable_mask.attr,
 	&dev_attr_fault_mask.attr,
-	&dev_attr_clear_faults.attr,
-	&dev_attr_power_mask.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(fast_fuse);
@@ -302,17 +229,10 @@ static int fast_fuse_probe(struct platform_device *pdev)
 				     FAST_FUSE_ADDR_BITS,
 				     ff->addr_gpios->ndescs);
 
-	/* 16 port power outputs (74HC595 shift register) */
-	ff->power_gpios = devm_gpiod_get_array(dev, "port-power", GPIOD_OUT_LOW);
-	if (IS_ERR(ff->power_gpios))
-		return dev_err_probe(dev, PTR_ERR(ff->power_gpios),
-				     "failed to get port-power GPIOs\n");
-
-	if (ff->power_gpios->ndescs != FAST_FUSE_MAX_PORTS)
-		return dev_err_probe(dev, -EINVAL,
-				     "expected %d port-power GPIOs, got %d\n",
-				     FAST_FUSE_MAX_PORTS,
-				     ff->power_gpios->ndescs);
+	/* Verify port-power driver is available */
+	if (!port_power_available())
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "port-power driver not ready\n");
 
 	/* Timing from DT (with defaults matching old firmware) */
 	of_property_read_u32(dev->of_node, "settle-time-ms",
@@ -336,6 +256,19 @@ static int fast_fuse_probe(struct platform_device *pdev)
 					"fast-fuse", ff);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to request IRQ\n");
+
+	/* Elevate IRQ thread to SCHED_FIFO so port power is cut with
+	 * minimal latency — the hardware comparators only signal the
+	 * fault, port_power_trip() is what actually removes power.
+	 */
+	{
+		struct irq_desc *desc = irq_to_desc(ff->irq);
+
+		if (desc && desc->action && desc->action->thread)
+			sched_set_fifo(desc->action->thread);
+		else
+			dev_warn(dev, "could not elevate IRQ thread priority\n");
+	}
 
 	platform_set_drvdata(pdev, ff);
 

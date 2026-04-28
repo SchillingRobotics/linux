@@ -73,4 +73,5 @@ obj-$(CONFIG_NSM)		+= nsm.o
 obj-$(CONFIG_MARVELL_CN10K_DPI)	+= mrvl_cn10k_dpi.o
 obj-y				+= keba/
 obj-$(CONFIG_MCHP_TFA_CTL)	+= mchp_tfa_ctl.o
+obj-$(CONFIG_PORT_POWER)	+= port-power.o
 obj-$(CONFIG_FAST_FUSE)		+= fast-fuse.o

@@ -619,14 +619,26 @@ config MCHP_TFA_CTL
 	  This will enable an interface for functions supplied by the
 	  Microchip LAN966X SoC secure firmware.
 
+config PORT_POWER
+	tristate "Port power control via 74HC595 GPIO expander"
+	depends on OF && GPIOLIB
+	help
+	  Driver for controlling 16 port power outputs via a GPIO expander
+	  (typically two daisy-chained 74HC595 shift registers). Provides
+	  a sysfs interface and an exported kernel API for use by the
+	  fast-fuse overcurrent protection driver.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called port-power.
+
 config FAST_FUSE
 	tristate "Hardware fast fuse overcurrent protection"
-	depends on OF && GPIOLIB
+	depends on OF && GPIOLIB && PORT_POWER
 	help
 	  Driver for hardware-based overcurrent protection using external
 	  comparators and a priority encoder. When an overcurrent condition
-	  is detected, the driver immediately cuts port power via 74HC595
-	  shift register GPIOs.
+	  is detected, the driver immediately cuts port power via the
+	  port-power driver.
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called fast-fuse.
