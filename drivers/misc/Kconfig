@@ -633,7 +633,8 @@ config PORT_POWER
 
 config FAST_FUSE
 	tristate "Hardware fast fuse overcurrent protection"
-	depends on OF && GPIOLIB && PORT_POWER
+	depends on OF && GPIOLIB
+	select PORT_POWER
 	help
 	  Driver for hardware-based overcurrent protection using external
 	  comparators and a priority encoder. When an overcurrent condition
