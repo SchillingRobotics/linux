@@ -7,7 +7,7 @@
  *
  * Provides:
  *   - sysfs "port_power_mask" for userspace control
- *   - Exported kernel API (port_power_cut, etc.)
+ *   - Exported kernel API (port_power_trip, etc.)
  *     for use by the fast-fuse overcurrent protection driver
  *
  * DTS node provides:
