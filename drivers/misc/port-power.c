@@ -6,7 +6,7 @@
  * daisy-chained 74HC595 shift registers on a bit-banged SPI bus).
  *
  * Provides:
- *   - sysfs "port_power_mask" for userspace control
+ *   - sysfs "enable_mask" for userspace control
  *   - Exported kernel API (port_power_trip, etc.)
  *     for use by the fast-fuse overcurrent protection driver
  *
@@ -61,7 +61,7 @@ EXPORT_SYMBOL_GPL(port_power_trip);
 
 /* ---------- sysfs interface ---------- */
 
-static ssize_t port_power_mask_show(struct device *dev,
+static ssize_t enable_mask_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
 	struct port_power *pp = dev_get_drvdata(dev);
@@ -75,7 +75,7 @@ static ssize_t port_power_mask_show(struct device *dev,
 	return sysfs_emit(buf, "0x%04x\n", mask);
 }
 
-static ssize_t port_power_mask_store(struct device *dev,
+static ssize_t enable_mask_store(struct device *dev,
 				     struct device_attribute *attr,
 				     const char *buf, size_t count)
 {
@@ -108,10 +108,10 @@ static ssize_t port_power_mask_store(struct device *dev,
 
 	return count;
 }
-static DEVICE_ATTR_RW(port_power_mask);
+static DEVICE_ATTR_RW(enable_mask);
 
 static struct attribute *port_power_attrs[] = {
-	&dev_attr_port_power_mask.attr,
+	&dev_attr_enable_mask.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(port_power);
