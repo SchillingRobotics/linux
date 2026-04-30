@@ -97,8 +97,10 @@ static irqreturn_t fast_fuse_thread(int irq, void *data)
 		 * regardless of fault_mask state. Defense in depth:
 		 * don't let a stale fault bit prevent a real trip.
 		 */
-		ff->fault_mask |= BIT(port);
-		tripped = true;
+		if (!(ff->fault_mask & BIT(port))) {
+			ff->fault_mask |= BIT(port);
+			tripped = true;
+		}
 	}
 	spin_unlock_irqrestore(&ff->lock, flags);
 
