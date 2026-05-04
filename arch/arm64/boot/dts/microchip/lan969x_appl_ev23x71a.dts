@@ -134,6 +134,7 @@
 			     <&gpio 1 GPIO_ACTIVE_LOW>,    /* bit 2 */
 			     <&gpio 0 GPIO_ACTIVE_LOW>,    /* bit 1 */
 			     <&gpio 13 GPIO_ACTIVE_LOW>;   /* bit 0 (LSB) */
+		irq-gpios = <&gpio 12 GPIO_ACTIVE_LOW>;    /* OVERCURRENT# readback */
 		settle-time-ms = <1>;
 		holdoff-time-us = <300>;
 		status = "okay";

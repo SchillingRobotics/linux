@@ -35,6 +35,7 @@ struct fast_fuse {
 
 	/* GPIO descriptors */
 	struct gpio_descs	*addr_gpios;	/* 4-bit address from encoder */
+	struct gpio_desc	*irq_gpio;	/* IRQ#/OVERCURRENT# line */
 
 	/* Configuration */
 	u32			settle_time_ms;
@@ -196,9 +197,28 @@ static ssize_t fault_mask_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(fault_mask);
 
+static ssize_t encoder_state_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	struct fast_fuse *ff = dev_get_drvdata(dev);
+	int addr;
+	u16 state;
+
+	addr = fast_fuse_read_addr(ff);
+	state = (addr >= 0) ? (addr & 0x0F) : 0;
+
+	/* Bit 15: IRQ#/OVERCURRENT# line active (fault present) */
+	if (ff->irq_gpio && gpiod_get_value(ff->irq_gpio))
+		state |= 0x8000;
+
+	return sysfs_emit(buf, "0x%04x\n", state);
+}
+static DEVICE_ATTR_RO(encoder_state);
+
 static struct attribute *fast_fuse_attrs[] = {
 	&dev_attr_enable_mask.attr,
 	&dev_attr_fault_mask.attr,
+	&dev_attr_encoder_state.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(fast_fuse);
@@ -230,6 +250,12 @@ static int fast_fuse_probe(struct platform_device *pdev)
 				     "expected %d addr GPIOs, got %d\n",
 				     FAST_FUSE_ADDR_BITS,
 				     ff->addr_gpios->ndescs);
+
+	/* IRQ#/OVERCURRENT# line for diagnostic readback (optional) */
+	ff->irq_gpio = devm_gpiod_get_optional(dev, "irq", GPIOD_IN);
+	if (IS_ERR(ff->irq_gpio))
+		return dev_err_probe(dev, PTR_ERR(ff->irq_gpio),
+				     "failed to get irq GPIO\n");
 
 	/* Verify port-power driver is available */
 	if (!port_power_available())
